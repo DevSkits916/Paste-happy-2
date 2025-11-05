@@ -2,6 +2,16 @@ import { FormEvent, useEffect, useState } from 'react';
 import { apiFetch } from '../api/client';
 import { useAppStore } from '../store/useAppStore';
 
+const DEFAULT_API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:4000';
+
+function normalizeBaseUrl(url: string) {
+  const trimmed = url.trim();
+  if (!trimmed) {
+    return DEFAULT_API_BASE;
+  }
+  return trimmed.replace(/\/+$/, '');
+}
+
 export default function SettingsPage() {
   const { apiBaseUrl, apiToken, setApiBaseUrl, setApiToken } = useAppStore();
   const [status, setStatus] = useState<string | null>(null);
@@ -60,6 +70,9 @@ export default function SettingsPage() {
     }
   }
 
+  const normalizedApiBase = normalizeBaseUrl(baseUrl);
+  const userscriptUrl = `${normalizedApiBase}/assist/userscript`;
+
   return (
     <section className="panel">
       <h2>Settings</h2>
@@ -94,6 +107,46 @@ export default function SettingsPage() {
       {status && <p className="muted">{status}</p>}
 
       <hr style={{ margin: '2rem 0' }} />
+
+      <section>
+        <h3>Facebook Group Helper (Userscript)</h3>
+        <p className="muted">
+          The Facebook Groups API no longer allows automated posting. This helper script fills
+          your ad text automatically when you open a group link from your queue. You still click
+          Post yourself — this keeps it safe and compliant.
+        </p>
+
+        <div className="button-row" style={{ marginTop: '1rem', gap: '0.5rem' }}>
+          <a
+            className="button"
+            href={userscriptUrl}
+            target="_blank"
+            rel="noreferrer"
+            download="paste-happy-fb-helper.user.js"
+          >
+            Download Userscript
+          </a>
+          <a
+            className="button secondary"
+            href="https://www.facebook.com/groups/test?ph=1"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Test Script
+          </a>
+        </div>
+
+        <ol style={{ marginTop: '1.5rem', paddingLeft: '1.25rem' }}>
+          <li>Install a userscript manager such as Tampermonkey.</li>
+          <li>Click “Download Userscript” and approve installation.</li>
+          <li>In Paste-Happy, use the “Copy &amp; Open” button — the helper will paste your ad automatically.</li>
+          <li>Press Enter or click Post.</li>
+        </ol>
+
+        <p className="muted" style={{ marginTop: '1rem' }}>
+          Need a direct link? Copy and share this install URL: <code>{userscriptUrl}</code>
+        </p>
+      </section>
 
       <section>
         <h3>Dev Login</h3>
