@@ -4,10 +4,28 @@ import { prisma } from '@paste-happy-pro/db';
 
 const router = Router();
 
+const groupUrlSchema = z
+  .string()
+  .trim()
+  .refine((value) => {
+    try {
+      const parsed = new URL(value);
+      if (!/^https?:$/.test(parsed.protocol)) {
+        return false;
+      }
+      if (parsed.hostname.endsWith('facebook.com')) {
+        return parsed.protocol === 'https:' && /\/groups\//.test(parsed.pathname);
+      }
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }, 'Invalid group URL');
+
 const queueItemSchema = z.object({
-  groupName: z.string().min(1),
-  groupUrl: z.string().url(),
-  adText: z.string().min(1),
+  groupName: z.string().trim().min(1),
+  groupUrl: groupUrlSchema,
+  adText: z.string().trim().min(20),
   status: z.enum(['queued', 'done', 'skipped']).optional(),
   attempts: z.number().int().nonnegative().optional(),
   lastPostedAt: z.string().datetime().optional().nullable(),
@@ -70,6 +88,40 @@ router.put('/:id', async (req, res, next) => {
       }
     });
     res.json(updated);
+  } catch (error) {
+    next(error);
+  }
+});
+
+const queueImportSchema = z.object({
+  rows: z
+    .array(
+      queueItemSchema.pick({ groupName: true, groupUrl: true, adText: true })
+    )
+    .min(1)
+});
+
+router.post('/import', async (req, res, next) => {
+  try {
+    const { rows } = queueImportSchema.parse(req.body);
+    const normalizedRows = rows.map((row) => ({
+      groupName: row.groupName.trim(),
+      groupUrl: row.groupUrl.trim(),
+      adText: row.adText.trim(),
+      status: 'queued' as const,
+      attempts: 0,
+      userId: req.userId!
+    }));
+
+    const created = await prisma.$transaction(
+      normalizedRows.map((row) =>
+        prisma.queueRow.create({
+          data: row
+        })
+      )
+    );
+
+    res.status(201).json(created);
   } catch (error) {
     next(error);
   }
