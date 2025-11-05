@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
+import { apiFetch } from '../api/client';
 import { useAppStore } from '../store/useAppStore';
 
 export default function SettingsPage() {
@@ -6,6 +7,10 @@ export default function SettingsPage() {
   const [status, setStatus] = useState<string | null>(null);
   const [baseUrl, setBaseUrl] = useState(apiBaseUrl);
   const [token, setToken] = useState(apiToken);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginStatus, setLoginStatus] = useState<string | null>(null);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loginLoading, setLoginLoading] = useState(false);
 
   useEffect(() => {
     setBaseUrl(apiBaseUrl);
@@ -20,6 +25,39 @@ export default function SettingsPage() {
     setApiBaseUrl(baseUrl);
     setApiToken(token);
     setStatus('Settings saved locally.');
+    setLoginStatus(null);
+  }
+
+  async function handleDevLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const email = loginEmail.trim();
+    if (!email) {
+      setLoginError('Enter an email to request a token.');
+      return;
+    }
+
+    setLoginError(null);
+    setLoginStatus(null);
+    setLoginLoading(true);
+
+    try {
+      const result = await apiFetch<{ token: string; user: { email: string } }>(
+        '/auth/dev-login',
+        {
+          method: 'POST',
+          body: JSON.stringify({ email }),
+          skipAuth: true
+        }
+      );
+      setApiToken(result.token);
+      setToken(result.token);
+      setLoginStatus(`Signed in as ${result.user.email}. Token saved locally.`);
+      setStatus(null);
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : 'Unable to login');
+    } finally {
+      setLoginLoading(false);
+    }
   }
 
   return (
@@ -54,6 +92,39 @@ export default function SettingsPage() {
       </form>
 
       {status && <p className="muted">{status}</p>}
+
+      <hr style={{ margin: '2rem 0' }} />
+
+      <section>
+        <h3>Dev Login</h3>
+        <p className="muted">Request a development token for quick testing.</p>
+        <form onSubmit={handleDevLogin} className="form-grid" style={{ gap: '1rem', marginTop: '1rem' }}>
+          <div>
+            <label htmlFor="dev-login-email">Email</label>
+            <input
+              id="dev-login-email"
+              name="email"
+              type="email"
+              value={loginEmail}
+              onChange={(event) => setLoginEmail(event.target.value)}
+              placeholder="you@example.com"
+              required
+            />
+          </div>
+          <div className="button-row">
+            <button type="submit" disabled={loginLoading}>
+              {loginLoading ? 'Requesting…' : 'Get Token'}
+            </button>
+          </div>
+        </form>
+
+        {loginStatus && <p className="muted">{loginStatus}</p>}
+        {loginError && (
+          <p role="alert" style={{ color: 'var(--red-500)', marginTop: '0.5rem' }}>
+            {loginError}
+          </p>
+        )}
+      </section>
     </section>
   );
 }
