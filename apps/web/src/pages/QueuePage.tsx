@@ -74,6 +74,124 @@ type StoredSettings = {
   columnWidths?: Partial<Record<ColumnKey, number>>;
 };
 
+type AssistOverride = {
+  city?: string;
+  gofundme_url?: string;
+};
+
+type AssistOverridesMap = Record<string, AssistOverride>;
+
+const ASSIST_OVERRIDES_KEY = 'queueAssistOverrides';
+const PACE_SECONDS = 45;
+const PACE_INTERVAL_MS = PACE_SECONDS * 1000;
+
+const GOFUNDME_REGEX = /https?:\/\/(?:www\.)?gofundme\.com\/[^\s)>'"]+/i;
+
+function readNotesObject(notes?: string | null): Record<string, unknown> | null {
+  if (!notes) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(notes);
+    if (parsed && typeof parsed === 'object') {
+      return parsed as Record<string, unknown>;
+    }
+  } catch (error) {
+    // ignore invalid JSON notes
+  }
+
+  return null;
+}
+
+function cleanUrlCandidate(url: string) {
+  return url.replace(/[)>'".,]+$/, '');
+}
+
+function inferGoFundMeFromText(text?: string | null): string | undefined {
+  if (!text) {
+    return undefined;
+  }
+  const match = text.match(GOFUNDME_REGEX);
+  return match ? cleanUrlCandidate(match[0]) : undefined;
+}
+
+function inferGoFundMe(item: QueueRow): string | undefined {
+  const notesObject = readNotesObject(item.notes);
+  const noteValue = notesObject?.gofundme_url ?? notesObject?.gofundme ?? notesObject?.fundraiser;
+  if (typeof noteValue === 'string' && noteValue.trim()) {
+    return cleanUrlCandidate(noteValue.trim());
+  }
+
+  return inferGoFundMeFromText(item.notes) ?? inferGoFundMeFromText(item.adText);
+}
+
+function inferCityFromNotes(notes?: string | null): string | undefined {
+  const notesObject = readNotesObject(notes);
+  if (notesObject && typeof notesObject.city === 'string' && notesObject.city.trim()) {
+    return notesObject.city.trim();
+  }
+
+  if (!notes) {
+    return undefined;
+  }
+
+  const match = notes.match(/city\s*[:=-]\s*([^\n,]+)/i);
+  if (match) {
+    return match[1].trim();
+  }
+
+  return undefined;
+}
+
+function applyPlaceholders(template: string, replacements: Record<'group_name' | 'gofundme_url' | 'city', string | undefined>) {
+  return template.replace(/{{\s*([^}]+?)\s*}}/g, (raw, key: string) => {
+    const normalized = key.trim().toLowerCase() as keyof typeof replacements;
+    if (normalized in replacements) {
+      const value = replacements[normalized];
+      return value !== undefined ? value : raw;
+    }
+    return raw;
+  });
+}
+
+function buildAssistContext(item: QueueRow, overrides: AssistOverridesMap) {
+  const override = overrides[item.id] ?? {};
+  const hasCityOverride = Object.prototype.hasOwnProperty.call(override, 'city');
+  const hasGoFundMeOverride = Object.prototype.hasOwnProperty.call(override, 'gofundme_url');
+
+  const fallbackCity = inferCityFromNotes(item.notes);
+  const fallbackGoFundMe = inferGoFundMe(item);
+
+  const gofundmeValue = hasGoFundMeOverride ? override.gofundme_url : fallbackGoFundMe;
+  const cityValue = hasCityOverride ? override.city : fallbackCity;
+
+  const replacements = {
+    group_name: item.groupName,
+    gofundme_url: gofundmeValue,
+    city: cityValue
+  } as const;
+
+  return {
+    rendered: applyPlaceholders(item.adText, replacements),
+    fallbackCity,
+    fallbackGoFundMe,
+    override,
+    hasCityOverride,
+    hasGoFundMeOverride
+  };
+}
+
+function appendAssistParam(url: string) {
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set('ph', '1');
+    return parsed.toString();
+  } catch (error) {
+    return url.includes('?') ? `${url}&ph=1` : `${url}?ph=1`;
+  }
+}
+
 function normalizeHeaderName(header: string) {
   return header.replace(/[\s_]+/g, '').toLowerCase();
 }
@@ -179,6 +297,24 @@ export default function QueuePage() {
   const [elapsedSeconds, setElapsedSeconds] = useState<number | null>(null);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [assistOverrides, setAssistOverrides] = useState<AssistOverridesMap>(() => {
+    if (typeof window === 'undefined') {
+      return {};
+    }
+    const stored = window.localStorage.getItem(ASSIST_OVERRIDES_KEY);
+    if (!stored) {
+      return {};
+    }
+    try {
+      const parsed = JSON.parse(stored) as AssistOverridesMap;
+      if (parsed && typeof parsed === 'object') {
+        return parsed;
+      }
+    } catch (error) {
+      console.warn('Failed to parse assist overrides', error);
+    }
+    return {};
+  });
   const resizingColumn = useRef<{ key: ColumnKey; startX: number; startWidth: number } | null>(null);
 
   const loadQueue = useCallback(async () => {
@@ -243,6 +379,17 @@ export default function QueuePage() {
   }, [columnWidths, onlyErrors, onlyIncomplete, searchQuery, settingsLoaded, statusFilter]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    if (Object.keys(assistOverrides).length === 0) {
+      window.localStorage.removeItem(ASSIST_OVERRIDES_KEY);
+      return;
+    }
+    window.localStorage.setItem(ASSIST_OVERRIDES_KEY, JSON.stringify(assistOverrides));
+  }, [assistOverrides]);
+
+  useEffect(() => {
     if (!lastCopyOpenAt) {
       setElapsedSeconds(null);
       return;
@@ -275,6 +422,44 @@ export default function QueuePage() {
     setSelectedId(filteredItems[0].id);
   }, [filteredItems, selectedId]);
 
+  const selectedItem = useMemo(
+    () => filteredItems.find((item) => item.id === selectedId) ?? null,
+    [filteredItems, selectedId]
+  );
+
+  const selectedAssist = useMemo(
+    () => (selectedItem ? buildAssistContext(selectedItem, assistOverrides) : null),
+    [assistOverrides, selectedItem]
+  );
+
+  const cooldownRemaining = lastCopyOpenAt ? Math.max(0, PACE_SECONDS - (elapsedSeconds ?? 0)) : 0;
+  const pacingCoolingDown = lastCopyOpenAt !== null && cooldownRemaining > 0;
+  const pacingLabel = pacingCoolingDown ? `${cooldownRemaining}s` : 'Ready';
+  const pacingSubLabel = pacingCoolingDown ? 'cooldown remaining' : 'Ready to assist';
+
+  const cityInputValue = selectedItem
+    ? selectedAssist?.hasCityOverride
+      ? selectedAssist?.override.city ?? ''
+      : selectedAssist?.fallbackCity ?? ''
+    : '';
+
+  const goFundMeInputValue = selectedItem
+    ? selectedAssist?.hasGoFundMeOverride
+      ? selectedAssist?.override.gofundme_url ?? ''
+      : selectedAssist?.fallbackGoFundMe ?? ''
+    : '';
+
+  const helperPreview = selectedAssist?.rendered ?? selectedItem?.adText ?? '';
+  const helperPreviewHasContent = helperPreview.trim().length > 0;
+
+  const showCityReset = Boolean(
+    selectedItem && selectedAssist?.hasCityOverride && selectedAssist?.fallbackCity
+  );
+
+  const showGoFundMeReset = Boolean(
+    selectedItem && selectedAssist?.hasGoFundMeOverride && selectedAssist?.fallbackGoFundMe
+  );
+
   const handleStatusChange = useCallback(
     async (id: string, status: QueueRow['status']) => {
       try {
@@ -290,15 +475,19 @@ export default function QueuePage() {
     []
   );
 
-  const handleCopy = useCallback(async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to copy to clipboard');
-      return false;
-    }
-  }, []);
+  const handleCopy = useCallback(
+    async (text: string) => {
+      try {
+        await navigator.clipboard.writeText(text);
+        setError(null);
+        return true;
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Unable to copy to clipboard');
+        return false;
+      }
+    },
+    [setError]
+  );
 
   const handleOpen = useCallback((url: string) => {
     window.open(url, '_blank', 'noopener');
@@ -306,13 +495,32 @@ export default function QueuePage() {
 
   const handleCopyAndOpen = useCallback(
     async (item: QueueRow) => {
-      const copied = await handleCopy(item.adText);
+      const now = Date.now();
+      if (lastCopyOpenAt && now - lastCopyOpenAt < PACE_INTERVAL_MS) {
+        const remainingMs = PACE_INTERVAL_MS - (now - lastCopyOpenAt);
+        const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+        setError(`Please wait ${remainingSeconds}s before using Copy & Open again.`);
+        return;
+      }
+
+      const context = buildAssistContext(item, assistOverrides);
+      const trimmed = context.rendered.trim();
+      if (!trimmed) {
+        setError('Ad copy is empty after placeholder replacements.');
+        return;
+      }
+
+      const copied = await handleCopy(context.rendered);
       if (!copied) {
         return;
       }
-      handleOpen(item.groupUrl);
+
       const nowIso = new Date().toISOString();
-      setLastCopyOpenAt(Date.now());
+      setLastCopyOpenAt(now);
+      setError(null);
+
+      handleOpen(appendAssistParam(item.groupUrl));
+
       setItems((prev) =>
         prev.map((row) =>
           row.id === item.id
@@ -324,6 +532,7 @@ export default function QueuePage() {
             : row
         )
       );
+
       void apiFetch<QueueRow>(`/queue/${item.id}`, {
         method: 'PUT',
         body: JSON.stringify({ attempts: item.attempts + 1, lastPostedAt: nowIso })
@@ -331,8 +540,15 @@ export default function QueuePage() {
         setError(err instanceof Error ? err.message : 'Failed to update attempts');
         void loadQueue();
       });
+
+      void apiFetch<{ snippet: string }>(`/assist/log`, {
+        method: 'POST',
+        body: JSON.stringify({ groupUrl: item.groupUrl, message: trimmed })
+      }).catch((err) => {
+        console.warn('Failed to log assist action', err);
+      });
     },
-    [handleCopy, handleOpen, loadQueue]
+    [assistOverrides, handleCopy, handleOpen, lastCopyOpenAt, loadQueue, setError]
   );
 
   const handleMarkDone = useCallback(
@@ -353,6 +569,44 @@ export default function QueuePage() {
       return next;
     });
   }, []);
+
+  const updateAssistOverride = useCallback((rowId: string, key: keyof AssistOverride, value: string) => {
+    setAssistOverrides((prev) => {
+      const next = { ...prev };
+      const current = { ...(next[rowId] ?? {}) };
+      const sanitized = key === 'gofundme_url' ? value.trim() : value;
+      current[key] = sanitized;
+      next[rowId] = current;
+      return next;
+    });
+  }, []);
+
+  const resetAssistOverride = useCallback((rowId: string, key: keyof AssistOverride) => {
+    setAssistOverrides((prev) => {
+      const next = { ...prev };
+      const current = { ...(next[rowId] ?? {}) };
+      delete current[key];
+      if (Object.keys(current).length === 0) {
+        delete next[rowId];
+      } else {
+        next[rowId] = current;
+      }
+      return next;
+    });
+  }, []);
+
+  const handleSetCurrentToClipboard = useCallback(async () => {
+    if (!selectedItem) {
+      return;
+    }
+    const context = selectedAssist ?? buildAssistContext(selectedItem, assistOverrides);
+    const trimmed = context.rendered.trim();
+    if (!trimmed) {
+      setError('Ad copy is empty after placeholder replacements.');
+      return;
+    }
+    await handleCopy(context.rendered);
+  }, [assistOverrides, handleCopy, selectedAssist, selectedItem, setError]);
 
   const parseImportFile = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -518,9 +772,9 @@ export default function QueuePage() {
           <p className="muted">Manage your group posting queue.</p>
         </div>
         <div className="panel-tools">
-          <div className={`pacing-timer${elapsedSeconds !== null && elapsedSeconds < 30 ? ' warn' : ''}`}>
-            <strong>{elapsedSeconds !== null ? `${elapsedSeconds}s` : '—'}</strong>
-            <span className="muted small"> since last Copy &amp; Open</span>
+          <div className={`pacing-timer${pacingCoolingDown ? ' warn' : ''}`}>
+            <strong>{pacingLabel}</strong>
+            <span className="muted small">{pacingSubLabel}</span>
           </div>
           <label className="file-upload">
             <span>Import CSV</span>
@@ -632,31 +886,32 @@ export default function QueuePage() {
 
       {loading && <p className="muted">Loading queue…</p>}
 
-      <div className="table-wrapper queue-table-wrapper">
-        <table className="queue-table">
-          <colgroup>
-            {COLUMN_KEYS.map((key) => (
-              <col key={key} style={{ width: `${columnWidths[key]}px` }} />
-            ))}
-          </colgroup>
-          <thead>
-            <tr>
+      <div className="queue-layout">
+        <div className="table-wrapper queue-table-wrapper">
+          <table className="queue-table">
+            <colgroup>
               {COLUMN_KEYS.map((key) => (
-                <th key={key}>
-                  <div className="th-content">
-                    <span>{COLUMN_LABELS[key]}</span>
-                    <span
-                      role="presentation"
-                      className="resize-handle"
-                      onPointerDown={(event) => startResizing(key, event)}
-                    />
-                  </div>
-                </th>
+                <col key={key} style={{ width: `${columnWidths[key]}px` }} />
               ))}
-            </tr>
-          </thead>
-          <tbody>
-            {filteredItems.map((item) => {
+            </colgroup>
+            <thead>
+              <tr>
+                {COLUMN_KEYS.map((key) => (
+                  <th key={key}>
+                    <div className="th-content">
+                      <span>{COLUMN_LABELS[key]}</span>
+                      <span
+                        role="presentation"
+                        className="resize-handle"
+                        onPointerDown={(event) => startResizing(key, event)}
+                      />
+                    </div>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filteredItems.map((item) => {
               const isSelected = item.id === selectedId;
               const isExpanded = expandedRows.has(item.id);
               const displayAd = isExpanded || item.adText.length <= 120;
@@ -747,9 +1002,98 @@ export default function QueuePage() {
                   </td>
                 </tr>
               );
-            })}
-          </tbody>
-        </table>
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <aside className="helper-panel">
+          <h3>Helper Panel</h3>
+          <p className="muted small">
+            Use placeholders like <code>{'{{group_name}}'}</code>, <code>{'{{city}}'}</code>, and{' '}
+            <code>{'{{gofundme_url}}'}</code> to personalize each post.
+          </p>
+          {selectedItem ? (
+            <>
+              <div className="helper-field">
+                <label htmlFor="helper-group-name">Group</label>
+                <input id="helper-group-name" value={selectedItem.groupName} readOnly />
+              </div>
+              <div className="helper-hints">
+                <div className="helper-hint">
+                  <code>{'{{group_name}}'}</code>
+                  <span>{selectedItem.groupName}</span>
+                </div>
+                <div className="helper-hint">
+                  <code>{'{{city}}'}</code>
+                  <span>{cityInputValue || '—'}</span>
+                </div>
+                <div className="helper-hint">
+                  <code>{'{{gofundme_url}}'}</code>
+                  <span>{goFundMeInputValue || '—'}</span>
+                </div>
+              </div>
+              <div className="helper-field">
+                <label htmlFor="helper-city">City</label>
+                <input
+                  id="helper-city"
+                  value={cityInputValue}
+                  onChange={(event) => updateAssistOverride(selectedItem.id, 'city', event.target.value)}
+                  placeholder="Add city name"
+                />
+                {selectedAssist?.fallbackCity && !selectedAssist.hasCityOverride && (
+                  <small className="muted small">Using city from notes.</small>
+                )}
+                {showCityReset && (
+                  <button
+                    type="button"
+                    className="link-button helper-reset"
+                    onClick={() => resetAssistOverride(selectedItem.id, 'city')}
+                  >
+                    Use suggested “{selectedAssist?.fallbackCity}”
+                  </button>
+                )}
+              </div>
+              <div className="helper-field">
+                <label htmlFor="helper-gofundme">GoFundMe URL</label>
+                <input
+                  id="helper-gofundme"
+                  value={goFundMeInputValue}
+                  onChange={(event) =>
+                    updateAssistOverride(selectedItem.id, 'gofundme_url', event.target.value)
+                  }
+                  placeholder="https://www.gofundme.com/..."
+                />
+                {selectedAssist?.fallbackGoFundMe && !selectedAssist.hasGoFundMeOverride && (
+                  <small className="muted small">Detected fundraiser link from your ad.</small>
+                )}
+                {showGoFundMeReset && (
+                  <button
+                    type="button"
+                    className="link-button helper-reset"
+                    onClick={() => resetAssistOverride(selectedItem.id, 'gofundme_url')}
+                  >
+                    Use detected link
+                  </button>
+                )}
+              </div>
+              <div className="helper-preview" aria-live="polite">
+                <pre className="helper-preview-text">{helperPreview}</pre>
+              </div>
+              <div className="button-row helper-actions">
+                <button
+                  type="button"
+                  onClick={() => void handleSetCurrentToClipboard()}
+                  disabled={!helperPreviewHasContent}
+                >
+                  Set current ad to clipboard
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="muted">Select a queue row to preview and copy.</p>
+          )}
+        </aside>
       </div>
 
       {!loading && filteredItems.length === 0 && <p>No queue items yet.</p>}
