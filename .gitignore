@@ -1,0 +1,11 @@
+node_modules
+/dist
+/apps/web/dist
+/apps/api/dist
+/packages/db/dist
+.env
+apps/api/.env
+apps/web/.env
+yarn-error.log
+.idea
+.DS_Store

@@ -1,0 +1,20 @@
+{
+  "name": "paste-happy-pro",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "yarn@1.22.22",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"yarn --cwd apps/api dev\" \"yarn --cwd apps/web dev\"",
+    "dev:api": "yarn --cwd apps/api dev",
+    "dev:web": "yarn --cwd apps/web dev",
+    "build": "yarn --cwd apps/api build && yarn --cwd apps/web build",
+    "lint": "echo 'Add project-wide linting'"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
