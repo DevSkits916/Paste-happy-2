@@ -7,6 +7,7 @@ import { authRouter } from './routes/auth.js';
 import { queueRouter } from './routes/queue.js';
 import { templatesRouter } from './routes/templates.js';
 import { logsRouter } from './routes/logs.js';
+import { assistRouter } from './routes/assist.js';
 import { requireAuth } from './middleware/auth.js';
 
 const app = express();
@@ -24,62 +25,131 @@ app.get('/assist/userscript', (_req, res) => {
   res.send(`// ==UserScript==
 // @name         Paste-Happy FB Group Helper
 // @namespace    https://tokensntokin.dev
-// @version      1.0
+// @version      1.1.0
 // @description  Auto-paste text into FB group composer so user can hit Post
 // @match        https://www.facebook.com/groups/*
 // @grant        none
 // ==/UserScript==
 
-(function() {
+(function () {
   'use strict';
-  const url = new URL(window.location.href);
-  if (url.searchParams.get('ph') !== '1') {
+
+  const logPrefix = '[Paste-Happy]';
+  const log = (...args) => console.log(logPrefix, ...args);
+  const warn = (...args) => console.warn(logPrefix, ...args);
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(window.location.href);
+  } catch (error) {
+    warn('Unable to parse window URL.', error);
     return;
   }
-  console.log('[Paste-Happy] detected assist mode.');
+
+  if (parsedUrl.searchParams.get('ph') !== '1') {
+    return;
+  }
+
+  log('Assist mode detected.');
+
+  const COMPOSER_SELECTOR = '[contenteditable][role="textbox"]';
+  const OBSERVER_TIMEOUT = 15000;
 
   const focusPostButton = () => {
-    const postButton = Array.from(document.querySelectorAll('[role="button"], button'))
-      .find((btn) => /post/i.test(btn?.textContent ?? ''));
-    if (postButton) {
-      postButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const buttons = Array.from(document.querySelectorAll('[role="button"], button'));
+    const postButton = buttons.find((button) => {
+      const label = (button.getAttribute('aria-label') || button.textContent || '').trim();
+      return /post/i.test(label);
+    });
+
+    if (!postButton) {
+      warn('Post button not found.');
+      return;
+    }
+
+    postButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    try {
+      if (typeof postButton.focus === 'function') {
+        postButton.focus({ preventScroll: true });
+      }
+    } catch (error) {
       try {
         postButton.focus();
-      } catch (error) {
-        // ignore focus errors
+      } catch (focusError) {
+        warn('Unable to focus Post button.', focusError);
       }
-      console.log('[Paste-Happy] Post button focused.');
+    }
+
+    log('Post button focused.');
+  };
+
+  const insertText = (composer, text) => {
+    if (!composer) {
+      return;
+    }
+
+    composer.focus();
+
+    const selection = window.getSelection();
+    if (selection) {
+      selection.removeAllRanges();
+      const range = document.createRange();
+      range.selectNodeContents(composer);
+      selection.addRange(range);
+    }
+
+    let inserted = false;
+    try {
+      if (typeof document.execCommand === 'function') {
+        inserted = document.execCommand('insertText', false, text);
+      }
+    } catch (error) {
+      warn('execCommand insertText failed.', error);
+    }
+
+    if (!inserted) {
+      composer.textContent = text;
+      try {
+        composer.dispatchEvent(
+          new InputEvent('input', {
+            bubbles: true,
+            data: text,
+            inputType: 'insertText'
+          })
+        );
+      } catch (error) {
+        // Ignore InputEvent support issues
+      }
+    }
+
+    log('Composer filled.');
+    focusPostButton();
+  };
+
+  const fillComposerWithClipboard = async (composer) => {
+    if (!composer) {
+      return;
+    }
+
+    try {
+      const clipboardText = await navigator.clipboard.readText();
+      if (!clipboardText) {
+        warn('Clipboard is empty.');
+        return;
+      }
+
+      insertText(composer, clipboardText);
+    } catch (error) {
+      warn('Unable to read clipboard.', error);
     }
   };
 
-  const fillComposer = (composer) => {
-    console.log('[Paste-Happy] Composer found.');
-    navigator.clipboard
-      .readText()
-      .then((clipboardText) => {
-        const text = clipboardText ?? '';
-        composer.focus();
-        const selection = window.getSelection();
-        if (selection) {
-          selection.removeAllRanges();
-          const range = document.createRange();
-          range.selectNodeContents(composer);
-          selection.addRange(range);
-        }
-        document.execCommand('insertText', false, text);
-        console.log('[Paste-Happy] Text inserted.');
-        focusPostButton();
-      })
-      .catch((error) => {
-        console.error('[Paste-Happy] Unable to read clipboard.', error);
-      });
-  };
-
-  const findComposer = () => document.querySelector('[contenteditable="true"][role="textbox"]');
+  const findComposer = () => document.querySelector(COMPOSER_SELECTOR);
 
   const existingComposer = findComposer();
   if (existingComposer) {
-    fillComposer(existingComposer);
+    void fillComposerWithClipboard(existingComposer);
     return;
   }
 
@@ -87,17 +157,16 @@ app.get('/assist/userscript', (_req, res) => {
     const composer = findComposer();
     if (composer) {
       observer.disconnect();
-      fillComposer(composer);
+      void fillComposerWithClipboard(composer);
     }
   });
 
-  const root = document.body;
-  if (!root) {
-    console.warn('[Paste-Happy] Unable to locate document.body.');
-    return;
+  if (document.body) {
+    observer.observe(document.body, { childList: true, subtree: true });
+    setTimeout(() => observer.disconnect(), OBSERVER_TIMEOUT);
+  } else {
+    warn('document.body not available.');
   }
-
-  observer.observe(root, { childList: true, subtree: true });
 })();
 `);
 });
@@ -123,6 +192,7 @@ app.get('/settings', (req, res) => {
   res.type('text/plain').send(instructions);
 });
 
+app.use('/assist', requireAuth, assistRouter);
 app.use('/auth', authRouter);
 app.use('/queue', requireAuth, queueRouter);
 app.use('/templates', requireAuth, templatesRouter);
