@@ -1,0 +1,69 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String          @id @default(cuid())
+  email     String          @unique
+  name      String?
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  pages     PageConnection[]
+  queues    QueueRow[]
+  templates Template[]
+  logs      PostLog[]
+}
+
+model PageConnection {
+  id          String   @id @default(cuid())
+  userId      String
+  pageId      String
+  pageName    String
+  accessToken String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model QueueRow {
+  id           String   @id @default(cuid())
+  userId       String
+  groupName    String
+  groupUrl     String
+  adText       String
+  status       String   @default("queued")
+  attempts     Int      @default(0)
+  lastPostedAt DateTime?
+  notes        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Template {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  body      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model PostLog {
+  id        String   @id @default(cuid())
+  userId    String
+  kind      String
+  refId     String?
+  target    String
+  message   String
+  status    String
+  meta      Json?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
