@@ -101,3 +101,62 @@ All protected routes require a `Bearer` token returned from the dev login endpoi
 - `yarn build` – build both API and web packages.
 
 Feel free to extend the tooling with linting, testing, and deployment workflows as the project evolves.
+
+## Render Deployment Guide
+
+Follow these steps to deploy the monorepo to [Render](https://render.com/):
+
+### 1. Provision Services
+
+1. **Render PostgreSQL (Starter plan)**
+   - Create a new PostgreSQL instance.
+   - Once provisioned, copy the `DATABASE_URL` from the *Info* tab; you will reference it when configuring the API environment variables.
+
+2. **Web Service: `apps/api`**
+   - **Environment**: Node.
+   - **Build Command**:
+     ```bash
+     yarn
+     cd packages/db && npx prisma migrate deploy
+     cd ../../apps/api && yarn build
+     ```
+   - **Start Command**:
+     ```bash
+     node dist/index.js
+     ```
+   - **Environment Variables**:
+     | Key | Value |
+     | --- | ----- |
+     | `DATABASE_URL` | Paste the connection string from the Render PostgreSQL service. |
+     | `JWT_SECRET` | Generate a strong random string (e.g., `openssl rand -hex 32`). |
+     | `APP_URL` | `https://<your-api>.onrender.com` (replace with the Web Service host name). |
+     | `ENCRYPTION_KEY` | Generate a 32-byte base64 string (e.g., `openssl rand -base64 32`). |
+
+   - Enable the PostgreSQL database as a *Linked Service* to populate `DATABASE_URL` automatically if preferred.
+
+3. **Static Site: `apps/web`**
+   - **Build Command**:
+     ```bash
+     yarn
+     cd apps/web && yarn build
+     ```
+   - **Publish Directory**: `apps/web/dist`
+   - **Environment Variables**:
+     | Key | Value |
+     | --- | ----- |
+     | `VITE_API_BASE` | `https://<your-api>.onrender.com` (match the API host name). |
+
+### 2. Facebook App Setup (Summary)
+
+- Create a Facebook App in Meta for Developers and add the **Facebook Login** product only if you need to obtain a user access token for exchanging into a Page token.
+- Request the `pages_manage_posts` and `pages_read_engagement` permissions for the app review process.
+- If you later implement full OAuth flows, configure valid OAuth redirect URIs that point to your API deployment (e.g., `https://<your-api>.onrender.com/auth/facebook/callback`).
+
+### 3. Post-Deployment Checks
+
+1. Send a request to `https://<your-api>.onrender.com/health` to confirm the API is responding.
+2. Call the `/auth/dev-login` endpoint to obtain a developer JWT and ensure authentication works.
+3. Use the API and frontend to create a user, import a CSV queue, and confirm records persist in the PostgreSQL database.
+4. Connect a Facebook Page token, publish a test post, and verify that a permalink is returned and accessible.
+
+With all checks passing, your Render deployment should be ready for production traffic.
